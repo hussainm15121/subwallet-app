@@ -531,27 +531,43 @@ IS THIS A SUBSCRIPTION PAYMENT/BILLING EMAIL? Extract service name and amount if
       return null;
     }
 
+    // Check payment recency to filter out old inactive subscriptions
+    const paymentDate = new Date(analysis.originalEmail.date);
+    const daysSincePayment = Math.floor((new Date() - paymentDate) / (1000 * 60 * 60 * 24));
+    
+    // Filter out payments older than 3 months (90 days) unless it's very recent (within 30 days)
+    if (daysSincePayment > 90 && daysSincePayment > 30) {
+      console.log(`Filtering out old subscription payment for ${analysis.serviceName}: ${daysSincePayment} days old`);
+      return null;
+    }
+
     // Use enhanced categorization
     const finalCategory = this.getCategoryForService(analysis.serviceName);
+    
+    // Use payment date to calculate proper renewal day
+    const renewalDay = paymentDate.getDate();
+    const nextRenewal = this.calculateNextRenewal(renewalDay);
 
     const subscription = {
       type: 'subscription',
       serviceName: analysis.serviceName,
       amount: analysis.amount,
       currency: analysis.currency || 'USD',
-      renewalDay: new Date().getDate(),
-      nextRenewal: this.calculateNextRenewal(),
+      renewalDay: renewalDay,
+      nextRenewal: nextRenewal,
       category: finalCategory,
       description: analysis.description || `AI-detected: ${analysis.originalEmail.subject.substring(0, 50)}${analysis.originalEmail.subject.length > 50 ? '...' : ''}`,
       confidence: analysis.confidence || 8,
       isMonthlyCharge: true,
       subject: analysis.originalEmail.subject,
       from: analysis.originalEmail.from,
-      date: new Date(analysis.originalEmail.date),
+      date: paymentDate,
       hasPaymentHistory: false,
       hasConsistentRenewalDate: false,
-      isRecurring: true,
-      paymentCount: 1
+      isRecurring: daysSincePayment <= 30, // Only mark as recurring if payment is recent
+      paymentCount: 1,
+      daysSinceLastPayment: daysSincePayment,
+      isRecentPayment: daysSincePayment <= 30
     };
 
     return subscription;

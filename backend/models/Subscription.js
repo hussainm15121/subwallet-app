@@ -132,7 +132,7 @@ subscriptionSchema.methods.calculateNextRenewal = function() {
   return nextRenewal;
 };
 
-// Method to add payment record
+// Enhanced method to add payment record with consistency analysis
 subscriptionSchema.methods.addPayment = function(paymentData) {
   this.paymentHistory.push({
     date: paymentData.date || new Date(),
@@ -145,9 +145,17 @@ subscriptionSchema.methods.addPayment = function(paymentData) {
   this.lastPaymentDate = paymentData.date || new Date();
   this.paymentCount = this.paymentHistory.length;
   
-  // Update recurring status if multiple payments
+  // Analyze payment patterns if we have multiple payments
   if (this.paymentCount > 1) {
+    const analysis = this.analyzePaymentConsistency();
     this.isRecurring = true;
+    this.hasConsistentRenewalDate = analysis.hasMonthlyPattern;
+    this.hasPaymentHistory = true;
+    
+    // Update confidence score based on pattern analysis
+    if (analysis.isConsistent && analysis.hasMonthlyPattern) {
+      this.confidenceScore = Math.max(this.confidenceScore, 8);
+    }
   }
 };
 
@@ -158,19 +166,70 @@ subscriptionSchema.methods.cancelSubscription = function(reason = 'User cancelle
   this.cancellationReason = reason;
 };
 
-// Method to check if subscription is likely valid based on pattern analysis
+// Enhanced method to check if subscription is likely valid with recency analysis
 subscriptionSchema.methods.isLikelyValid = function() {
-  // High confidence if multiple consistent payments
-  if (this.paymentCount > 1 && this.isRecurring) {
+  // Check recency - subscriptions older than 6 months are questionable
+  const daysSinceLastPayment = this.lastPaymentDate 
+    ? Math.floor((new Date() - this.lastPaymentDate) / (1000 * 60 * 60 * 24))
+    : 999;
+  
+  // Very old subscriptions are likely inactive
+  if (daysSinceLastPayment > 180) {
+    return false;
+  }
+  
+  // High confidence if multiple consistent payments and recent
+  if (this.paymentCount > 1 && this.isRecurring && daysSinceLastPayment <= 90) {
     return true;
   }
   
-  // Medium confidence if single payment but high confidence score
-  if (this.paymentCount === 1 && this.confidenceScore >= 6 && this.hasPaymentHistory) {
+  // Medium confidence if single recent payment with high confidence score
+  if (this.paymentCount === 1 && this.confidenceScore >= 6 && daysSinceLastPayment <= 60) {
+    return true;
+  }
+  
+  // Very recent payments with decent confidence
+  if (daysSinceLastPayment <= 30 && this.confidenceScore >= 4) {
     return true;
   }
   
   return false;
+};
+
+// Method to analyze payment consistency
+subscriptionSchema.methods.analyzePaymentConsistency = function() {
+  if (this.paymentHistory.length < 2) {
+    return {
+      isConsistent: false,
+      averageInterval: 0,
+      hasMonthlyPattern: false
+    };
+  }
+  
+  // Sort payments by date
+  const sortedPayments = this.paymentHistory.sort((a, b) => new Date(a.date) - new Date(b.date));
+  
+  // Calculate intervals between payments
+  const intervals = [];
+  for (let i = 1; i < sortedPayments.length; i++) {
+    const intervalDays = (new Date(sortedPayments[i].date) - new Date(sortedPayments[i-1].date)) / (1000 * 60 * 60 * 24);
+    intervals.push(intervalDays);
+  }
+  
+  const averageInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  const hasMonthlyPattern = averageInterval >= 25 && averageInterval <= 35;
+  
+  // Check amount consistency
+  const amounts = sortedPayments.map(p => p.amount);
+  const avgAmount = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+  const isConsistent = amounts.every(amount => Math.abs(amount - avgAmount) <= (avgAmount * 0.1));
+  
+  return {
+    isConsistent,
+    averageInterval,
+    hasMonthlyPattern,
+    paymentCount: this.paymentHistory.length
+  };
 };
 
 subscriptionSchema.pre('save', function(next) {

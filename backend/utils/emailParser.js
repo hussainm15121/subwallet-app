@@ -520,6 +520,10 @@ const parseEmailForSubscription = (messageData) => {
       return null;
     }
 
+    // Calculate payment recency for filtering
+    const paymentDate = new Date(dateHeader);
+    const daysSincePayment = Math.floor((new Date() - paymentDate) / (1000 * 60 * 60 * 24));
+    
     const subscription = {
       type: 'subscription',
       serviceName: serviceName.charAt(0).toUpperCase() + serviceName.slice(1),
@@ -535,7 +539,9 @@ const parseEmailForSubscription = (messageData) => {
       isMonthlyCharge: monthlyChargeScore >= 2,
       subject,
       from,
-      date: new Date(dateHeader)
+      date: paymentDate,
+      daysSincePayment,
+      isRecentPayment: daysSincePayment <= 30
     };
 
     console.log('✅ Accepted subscription:', {
@@ -555,7 +561,7 @@ const parseEmailForSubscription = (messageData) => {
   }
 };
 
-// Function to detect subscription patterns across multiple emails
+// Enhanced function to detect subscription patterns with monthly occurrence analysis
 const analyzeSubscriptionPatterns = (emails) => {
   const servicePayments = new Map();
   const cancellations = new Map();
@@ -565,58 +571,105 @@ const analyzeSubscriptionPatterns = (emails) => {
     if (!parsed) return;
     
     if (parsed.type === 'cancellation') {
-      cancellations.set(parsed.serviceName, parsed);
+      cancellations.set(parsed.serviceName.toLowerCase(), parsed);
     } else if (parsed.type === 'subscription') {
-      if (!servicePayments.has(parsed.serviceName)) {
-        servicePayments.set(parsed.serviceName, []);
+      const serviceKey = parsed.serviceName.toLowerCase();
+      if (!servicePayments.has(serviceKey)) {
+        servicePayments.set(serviceKey, []);
       }
-      servicePayments.get(parsed.serviceName).push(parsed);
+      servicePayments.get(serviceKey).push(parsed);
     }
   });
   
-  // Analyze payment patterns for each service
+  // Enhanced payment pattern analysis
   const confirmedSubscriptions = [];
   
-  servicePayments.forEach((payments, serviceName) => {
+  servicePayments.forEach((payments, serviceKey) => {
     // Check if service was cancelled
-    if (cancellations.has(serviceName)) {
-      console.log(`${serviceName} was cancelled, skipping...`);
+    if (cancellations.has(serviceKey)) {
+      console.log(`${serviceKey} was cancelled, skipping...`);
       return;
     }
     
-    // For single payment, use more flexible criteria
+    // Sort payments by date (newest first)
+    payments.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const latestPayment = payments[0];
+    const daysSinceLatest = Math.floor((new Date() - new Date(latestPayment.date)) / (1000 * 60 * 60 * 24));
+    
+    // Filter out very old subscriptions (older than 6 months)
+    if (daysSinceLatest > 180) {
+      console.log(`${serviceKey}: Latest payment too old (${daysSinceLatest} days), skipping...`);
+      return;
+    }
+    
     if (payments.length === 1) {
+      // Single payment analysis with enhanced recency checks
       const payment = payments[0];
-      // More flexible acceptance criteria for single payments
-      const isRecentPayment = new Date(payment.date) > new Date(Date.now() - 30 * 24 * 60 * 60 * 1000); // Within 30 days
+      const isVeryRecent = daysSinceLatest <= 30; // Within 30 days
+      const isRecentlyActive = daysSinceLatest <= 90; // Within 3 months
       
-      if (payment.confidence >= 2 || // Much lower threshold
-          payment.hasPaymentHistory || 
-          payment.hasConsistentRenewalDate ||
-          payment.isMonthlyCharge ||
-          (isRecentPayment && payment.confidence >= 1)) { // Very flexible for recent payments
+      // More stringent criteria for single payments
+      const shouldAccept = (
+        (isVeryRecent && payment.confidence >= 3) || // Recent payment with decent confidence
+        (payment.confidence >= 6) || // High confidence regardless of age
+        (payment.hasPaymentHistory && isRecentlyActive) || // Has payment history and recent
+        (payment.hasConsistentRenewalDate && isRecentlyActive) || // Consistent renewal pattern
+        (payment.isMonthlyCharge && isRecentlyActive) // Clear monthly charge language
+      );
+      
+      if (shouldAccept) {
         confirmedSubscriptions.push({
           ...payment,
-          confidence: payment.confidence >= 6 ? 'high' : 'medium',
-          confidenceScore: payment.confidence, // Keep numeric confidence
+          confidence: payment.confidence >= 6 ? 'high' : (isVeryRecent ? 'medium' : 'low'),
+          confidenceScore: payment.confidence,
           paymentCount: 1,
-          isRecentPayment
+          isRecentPayment: isVeryRecent,
+          daysSinceLastPayment: daysSinceLatest,
+          isRecurring: isVeryRecent || payment.confidence >= 6
         });
+      } else {
+        console.log(`${serviceKey}: Single payment rejected - Age: ${daysSinceLatest} days, Confidence: ${payment.confidence}`);
       }
     } else {
-      // Multiple payments - analyze for consistency
+      // Multiple payments - enhanced recurring pattern analysis
       const amounts = payments.map(p => p.amount);
-      const consistentAmount = amounts.every(a => Math.abs(a - amounts[0]) < 0.01);
+      const dates = payments.map(p => new Date(p.date));
       
-      if (consistentAmount) {
-        const latestPayment = payments.sort((a, b) => new Date(b.date) - new Date(a.date))[0];
+      // Check amount consistency
+      const avgAmount = amounts.reduce((a, b) => a + b, 0) / amounts.length;
+      const consistentAmount = amounts.every(amount => Math.abs(amount - avgAmount) <= (avgAmount * 0.1)); // 10% tolerance
+      
+      // Check temporal patterns for monthly billing
+      let hasMonthlyPattern = false;
+      if (payments.length >= 2) {
+        const intervals = [];
+        for (let i = 1; i < dates.length; i++) {
+          const intervalDays = Math.abs((dates[i-1] - dates[i]) / (1000 * 60 * 60 * 24));
+          intervals.push(intervalDays);
+        }
+        
+        // Check if intervals are roughly monthly (25-35 days)
+        const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+        hasMonthlyPattern = avgInterval >= 25 && avgInterval <= 35;
+        
+        console.log(`${serviceKey}: Multiple payments analysis - Avg interval: ${avgInterval.toFixed(1)} days, Monthly pattern: ${hasMonthlyPattern}`);
+      }
+      
+      // Accept if amount is consistent OR has monthly pattern
+      if (consistentAmount || hasMonthlyPattern) {
         confirmedSubscriptions.push({
           ...latestPayment,
           confidence: 'very-high',
-          confidenceScore: latestPayment.confidence, // Keep numeric confidence
+          confidenceScore: Math.max(latestPayment.confidence, 8), // Boost confidence for recurring
           paymentCount: payments.length,
-          isRecurring: true
+          isRecurring: true,
+          hasMonthlyPattern,
+          consistentAmount,
+          daysSinceLastPayment: daysSinceLatest,
+          isRecentPayment: daysSinceLatest <= 30
         });
+      } else {
+        console.log(`${serviceKey}: Multiple payments rejected - Inconsistent amounts or no monthly pattern`);
       }
     }
   });

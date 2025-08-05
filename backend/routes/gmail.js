@@ -331,16 +331,35 @@ router.post('/import', auth, async (req, res) => {
           continue;
         }
 
-        // Ensure nextRenewal is a valid date
+        // Enhanced renewal date calculation based on last payment date
         let nextRenewal = subData.nextRenewal;
+        let renewalDay = subData.renewalDay;
+        
+        // Use last payment date to determine proper renewal day if available
+        if (subData.date) {
+          const lastPaymentDate = new Date(subData.date);
+          renewalDay = lastPaymentDate.getDate();
+          console.log(`Using renewal day ${renewalDay} from last payment date: ${lastPaymentDate.toISOString()}`);
+        }
+        
         if (!nextRenewal || isNaN(new Date(nextRenewal).getTime())) {
-          // Calculate next renewal if missing or invalid
           const now = new Date();
-          nextRenewal = new Date(now.getFullYear(), now.getMonth(), subData.renewalDay || 1);
+          const lastPaymentDate = subData.date ? new Date(subData.date) : now;
+          
+          // Calculate next renewal based on last payment date
+          nextRenewal = new Date(lastPaymentDate.getFullYear(), lastPaymentDate.getMonth() + 1, renewalDay || lastPaymentDate.getDate());
+          
+          // If the calculated date is in the past, move it to next month
           if (nextRenewal <= now) {
             nextRenewal.setMonth(nextRenewal.getMonth() + 1);
           }
-          console.log('Calculated nextRenewal:', nextRenewal);
+          
+          console.log('Calculated nextRenewal based on payment date:', nextRenewal);
+        }
+        
+        // Final validation - ensure renewalDay is properly set
+        if (!renewalDay && nextRenewal) {
+          renewalDay = new Date(nextRenewal).getDate();
         }
 
         // Check if subscription already exists
@@ -356,7 +375,7 @@ router.post('/import', auth, async (req, res) => {
             serviceName: subData.serviceName.trim(),
             amount: parseFloat(subData.amount),
             currency: subData.currency,
-            renewalDay: parseInt(subData.renewalDay),
+            renewalDay: parseInt(renewalDay || subData.renewalDay || 1),
             nextRenewal: new Date(nextRenewal),
             category: subData.category || 'Other',
             description: subData.description || `Auto-detected from Gmail`,
@@ -367,7 +386,10 @@ router.post('/import', auth, async (req, res) => {
             hasConsistentRenewalDate: subData.hasConsistentRenewalDate || false,
             isRecurring: subData.isRecurring || false,
             paymentCount: subData.paymentCount || 0,
-            lastPaymentDate: subData.date ? new Date(subData.date) : new Date()
+            lastPaymentDate: subData.date ? new Date(subData.date) : new Date(),
+            // Add recency validation fields
+            isRecentPayment: subData.date ? (new Date() - new Date(subData.date)) / (1000 * 60 * 60 * 24) <= 60 : false, // Within 60 days
+            daysSinceLastPayment: subData.date ? Math.floor((new Date() - new Date(subData.date)) / (1000 * 60 * 60 * 24)) : 0
           };
 
           console.log('Creating subscription with enhanced data:', subscriptionData);
